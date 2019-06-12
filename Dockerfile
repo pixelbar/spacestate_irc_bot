@@ -1,8 +1,8 @@
-FROM ubuntu:16.04
+FROM ubuntu:18.04
 
 RUN apt update && \
     apt upgrade -y && \
-    apt install libssl-dev -y
+    apt install libssl-dev curl -y
 
 COPY target/release/spacestate_irc_bot /spacestate_irc_bot
 

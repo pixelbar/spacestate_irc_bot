@@ -17,17 +17,17 @@ fn main() {
         std::thread::spawn(move || poll_state(client));
     }
     client
-        .for_each_incoming(|irc_msg| {
-            if let Command::PRIVMSG(channel, message) = irc_msg.command {
-                if message.contains("!state") || message.contains("!spacestate") {
-                    let last_state = &*CURRENT_STATE.lock().unwrap();
-                    client
-                        .send_privmsg(&channel, format!("Pixelbar is {:?}!", last_state))
-                        .unwrap();
-                }
+    .for_each_incoming(|irc_msg| {
+        if let Command::PRIVMSG(channel, message) = irc_msg.command {
+            if message.contains("!state") || message.contains("!spacestate") {
+                let last_state = &*CURRENT_STATE.lock().unwrap();
+                client
+                    .send_privmsg(&channel, format!("Pixelbar is {:?}!", last_state))
+                    .unwrap();
             }
-        })
-        .unwrap();
+        }
+    })
+    .unwrap();
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -76,10 +76,15 @@ fn poll_state(bot: IrcClient) {
 // Try to get the spacestate and return an enum containing the value.
 // This requests https://spacestate.pixelbar.nl/spacestate.php and compares it to one of two hardcoded values for Open and Closed.
 // If the returning value is different, State::Unknown is returned.
-fn try_get_state() -> Result<State, reqwest::Error> {
-    let response = reqwest::get("https://spacestate.pixelbar.nl/spacestate.php")?.text()?;
+fn try_get_state() -> Result<State, failure::Error> {
+    let command = std::process::Command::new("curl")
+        .arg("-s")
+        .arg("https://spacestate.pixelbar.nl/spacestate.php")
+        .output()?;
 
-    Ok(match response.as_str() {
+    let response = std::str::from_utf8(&command.stdout)?;
+
+    Ok(match response {
         r#"{"state":"open"}"# => State::Open,
         r#"{"state":"closed"}"# => State::Closed,
         x => {

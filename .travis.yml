@@ -4,13 +4,7 @@ dist: xenial
 services:
 - docker
 
-addons:
-  apt:
-    packages:
-    - libssl-dev
-
 script:
-- apt-cache policy libssl-dev
 - cargo test || travis_terminate 1;
 - cargo build --release || travis_terminate 1;
 - docker build -t spacestate_irc_bot . || travis_terminate 1;
