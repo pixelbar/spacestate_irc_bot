@@ -1,33 +1,45 @@
 use irc::client::prelude::*;
 use lazy_static::lazy_static;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 fn main() {
-    let config = Config {
-        nickname: Some(String::from("spacestate")),
-        server: Some(String::from("irc.smurfnet.ch")),
-        channels: Some(vec![String::from("#pixelbar")]),
+    loop {
+        let is_running_handle = Arc::new(AtomicBool::new(true));
 
-        ..Default::default()
-    };
-    let client = IrcClient::from_config(config).unwrap();
-    client.identify().unwrap();
-    {
-        let client = client.clone();
-        std::thread::spawn(move || poll_state(client));
-    }
-    client
-    .for_each_incoming(|irc_msg| {
-        if let Command::PRIVMSG(channel, message) = irc_msg.command {
-            if message.contains("!state") || message.contains("!spacestate") {
-                let last_state = &*CURRENT_STATE.lock().unwrap();
-                client
-                    .send_privmsg(&channel, format!("Pixelbar is {:?}!", last_state))
-                    .unwrap();
-            }
+        let config = Config {
+            nickname: Some(String::from("spacestate")),
+            server: Some(String::from("irc.smurfnet.ch")),
+            channels: Some(vec![String::from("#pixelbar")]),
+
+            ..Default::default()
+        };
+        let client = IrcClient::from_config(config).unwrap();
+        if let Err(e) = client.identify() {
+            eprintln!("Could not identify: {:?}", e);
+            continue;
         }
-    })
-    .unwrap();
+        let thread_handle = {
+            let client = client.clone();
+            let is_running_handle = is_running_handle.clone();
+            std::thread::spawn(move || poll_state(client, is_running_handle))
+        };
+        let result = client.for_each_incoming(|irc_msg| {
+            if let Command::PRIVMSG(channel, message) = irc_msg.command {
+                if message.contains("!state") || message.contains("!spacestate") {
+                    let last_state = &*CURRENT_STATE.lock().unwrap();
+                    let _ = client.send_privmsg(&channel, format!("Pixelbar is {:?}!", last_state));
+                }
+            }
+        });
+        println!("IRC bot died: {:?}", result);
+        is_running_handle.store(false, Ordering::Relaxed);
+        if let Err(e) = thread_handle.join() {
+            eprintln!("Could not wait for thread handle, assuming it is closed");
+            eprintln!("{:?}", e);
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -43,8 +55,8 @@ lazy_static! {
 
 // Polls the spacestate and updates the CURRENT_STATE accordingly
 // This also broadcasts the message to (hardcoded) channel #pixelbar
-fn poll_state(bot: IrcClient) {
-    loop {
+fn poll_state(bot: IrcClient, is_running: Arc<AtomicBool>) {
+    while is_running.load(Ordering::Relaxed) {
         match try_get_state() {
             Ok(State::Unknown) => {
                 println!("Unknown spacestate");
