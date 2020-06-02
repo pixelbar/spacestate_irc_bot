@@ -1,9 +1,26 @@
-FROM ubuntu:18.04
+FROM alpine:latest AS builder
 
-RUN apt update && \
-    apt upgrade -y && \
-    apt install libssl-dev curl -y
+WORKDIR /app
 
-COPY target/release/spacestate_irc_bot /spacestate_irc_bot
+RUN apk update
+RUN apk upgrade
+RUN apk add cargo
 
-ENTRYPOINT ["/spacestate_irc_bot"]
+COPY src ./src/
+COPY Cargo.toml .
+
+RUN ls -laR
+RUN cargo build --release
+
+FROM alpine:latest
+
+WORKDIR /app
+
+RUN apk update
+RUN apk upgrade
+RUN apk add ca-certificates libgcc
+
+COPY --from=builder /app/target/release/spacestate_irc_bot .
+
+CMD ["./spacestate_irc_bot"]
+
