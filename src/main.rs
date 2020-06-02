@@ -1,44 +1,65 @@
+#[macro_use]
+extern crate serde_derive;
+
+use futures::prelude::*;
 use irc::client::prelude::*;
 use lazy_static::lazy_static;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     loop {
-        let is_running_handle = Arc::new(AtomicBool::new(true));
-
         let config = Config {
             nickname: Some(String::from("spacestate")),
             server: Some(String::from("irc.smurfnet.ch")),
-            channels: Some(vec![String::from("#pixelbar")]),
+            channels: vec![String::from("#pixelbar")],
+            use_tls: Some(false),
 
             ..Default::default()
         };
-        let client = IrcClient::from_config(config).unwrap();
+        let mut client = Client::from_config(config).await.unwrap();
         if let Err(e) = client.identify() {
             eprintln!("Could not identify: {:?}", e);
-            continue;
-        }
-        let thread_handle = {
-            let client = client.clone();
-            let is_running_handle = is_running_handle.clone();
-            std::thread::spawn(move || poll_state(client, is_running_handle))
-        };
-        let result = client.for_each_incoming(|irc_msg| {
-            if let Command::PRIVMSG(channel, message) = irc_msg.command {
-                if message.contains("!state") || message.contains("!spacestate") {
-                    let last_state = &*CURRENT_STATE.lock().unwrap();
-                    let _ = client.send_privmsg(&channel, format!("Pixelbar is {:?}!", last_state));
+        } else {
+            let sender = client.sender();
+            let is_running = Arc::new(AtomicBool::new(true));
+
+            let join_handle = tokio::spawn(poll_state(sender, Arc::clone(&is_running)));
+
+            let mut stream = client.stream().unwrap();
+            loop {
+                match stream.next().await {
+                    Some(Ok(msg)) => {
+                        if let Command::PRIVMSG(channel, message) = msg.command {
+                            if message.contains("!state") || message.contains("!spacestate") {
+                                let last_state = &*CURRENT_STATE.lock().unwrap();
+                                let _ = client.send_privmsg(
+                                    &channel,
+                                    format!("Pixelbar is {:?}!", last_state),
+                                );
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("IRC bot died: {:?}", e);
+                        break;
+                    }
+                    None => {
+                        eprintln!("IRC stream returned None...?");
+                    }
                 }
             }
-        });
-        println!("IRC bot died: {:?}", result);
-        is_running_handle.store(false, Ordering::Relaxed);
-        if let Err(e) = thread_handle.join() {
-            eprintln!("Could not wait for thread handle, assuming it is closed");
-            eprintln!("{:?}", e);
+            is_running.store(false, Ordering::Relaxed);
+            if let Err(e) = join_handle.await {
+                eprintln!("Could not join background thread: {:?}", e);
+            }
         }
+
+        eprintln!("Rebooting in 10 seconds");
+        tokio::time::delay_for(std::time::Duration::from_secs(10)).await;
     }
 }
 
@@ -55,9 +76,9 @@ lazy_static! {
 
 // Polls the spacestate and updates the CURRENT_STATE accordingly
 // This also broadcasts the message to (hardcoded) channel #pixelbar
-fn poll_state(bot: IrcClient, is_running: Arc<AtomicBool>) {
+async fn poll_state(bot: Sender, is_running: Arc<AtomicBool>) {
     while is_running.load(Ordering::Relaxed) {
-        match try_get_state() {
+        match try_get_state().await {
             Ok(State::Unknown) => {
                 println!("Unknown spacestate");
             }
@@ -81,27 +102,30 @@ fn poll_state(bot: IrcClient, is_running: Arc<AtomicBool>) {
                 println!("Could not get space state: {:?}", e);
             }
         }
-        std::thread::sleep(std::time::Duration::from_secs(60));
+        tokio::time::delay_for(std::time::Duration::from_secs(60)).await;
     }
 }
 
 // Try to get the spacestate and return an enum containing the value.
 // This requests https://spacestate.pixelbar.nl/spacestate.php and compares it to one of two hardcoded values for Open and Closed.
 // If the returning value is different, State::Unknown is returned.
-fn try_get_state() -> Result<State, failure::Error> {
-    let command = std::process::Command::new("curl")
-        .arg("-s")
-        .arg("https://spacestate.pixelbar.nl/spacestate.php")
-        .output()?;
+async fn try_get_state() -> Result<State, Box<dyn std::error::Error>> {
+    let state: Spacestate = reqwest::get("https://spacestate.pixelbar.nl/spacestate.php")
+        .await?
+        .json()
+        .await?;
 
-    let response = std::str::from_utf8(&command.stdout)?;
-
-    Ok(match response {
-        r#"{"state":"open"}"# => State::Open,
-        r#"{"state":"closed"}"# => State::Closed,
+    Ok(match state.state.as_str() {
+        "open" => State::Open,
+        "closed" => State::Closed,
         x => {
             println!("Unknown space state: {:?}", x);
             State::Unknown
         }
     })
+}
+
+#[derive(Deserialize)]
+struct Spacestate {
+    state: String,
 }
